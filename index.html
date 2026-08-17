@@ -355,7 +355,7 @@ input[type=file]{display:none}
 /* ============================================================
    Lecteur — documents lus à voix haute, avec adaptation à l'écoute
    ============================================================ */
-const VERSION = '2026-08-11 · build 16';
+const VERSION = '2026-08-17 · build 17';
 const $ = s => document.querySelector(s);
 const synth = window.speechSynthesis;
 if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -462,12 +462,46 @@ const SPEAK = [
   [/\s*&\s*/g, ' et '],
   [/\s{2,}/g, ' ']
 ];
+/* ---------- INVARIANT DE L'ÉLISION ----------
+   Chirp ne relie l'apostrophe au mot suivant que si le caractère qui suit est
+   une lettre ASCII. Sinon il traite la consonne comme un mot isolé et l'épelle :
+   « d'Œuvre » lu « D, Œuvre ». C'est le même défaut qui touchait « d'équipe ».
+   La forme NFD l'avait réglé pour les lettres accentuées — elle les réécrit en
+   « lettre ASCII + accent combinant » — mais elle ne peut rien pour les
+   ligatures œ Œ æ Æ, seules lettres du français sans décomposition Unicode,
+   ni canonique ni de compatibilité. La casse n'y est pour rien : É comme é
+   passent, Œ comme œ échouent.
+
+   Le repérage n'énumère aucun caractère : il repose sur la propriété Unicode
+   « lettre » (\p{L}). La réparation, elle, ne peut pas être algorithmique pour
+   les ligatures — Unicode ne fournit aucun équivalent ASCII — d'où la table
+   FOLD, tenue courte et volontairement traitée en dernier recours. Toute lettre
+   qu'elle ne couvre pas n'est pas devinée : elle est laissée telle quelle et
+   signalée par badElisions() dans le panneau d'analyse. */
+const FOLD = {'œ':'oe','Œ':'Oe','æ':'ae','Æ':'Ae','ø':'o','Ø':'O',
+              'ł':'l','Ł':'L','đ':'d','Đ':'D','ß':'ss','ı':'i','ŋ':'ng'};
+const elisionSafe = s => s.replace(/(['\u2019])(\p{L})(\p{L}?)/gu, (m, ap, L, nx) => {
+  const dec = L.normalize('NFD');
+  if(dec.codePointAt(0) < 128) return ap + dec + nx;   // accents, les deux casses
+  const f = FOLD[L];
+  if(!f) return m;                                     // inconnu : on ne devine pas
+  const maj = /\p{Lu}/u.test(L) && (!nx || /\p{Lu}/u.test(nx));
+  return ap + (maj ? f.toUpperCase() : f) + nx;        // « L'ŒUVRE » et non « L'OeUVRE »
+});
+/* Liste des caractères qui violent encore l'invariant. Doit rester vide sur
+   tout texte envoyé à la synthèse ; sert de contrôle, dans le panneau
+   d'analyse comme dans un test hors navigateur. */
+const badElisions = s =>
+  [...s.matchAll(/['\u2019](\S)/g)].map(m => m[1]).filter(c => c.codePointAt(0) > 127);
+
 /* Forme des accents envoyée à la synthèse. Algenib prononce correctement
    la forme décomposée et bute sur la forme composée après une élision.
-   Réglable, car le comportement peut différer d'une voix à l'autre. */
+   Réglable, car le comportement peut différer d'une voix à l'autre.
+   elisionSafe s'applique après ce choix : l'invariant tient dans les deux
+   réglages, y compris en forme composée. */
 function tts(t){
   const s = speakable(t);
-  return S.accents==='nfd' ? s.normalize('NFD') : s.normalize('NFC');
+  return elisionSafe(S.accents==='nfd' ? s.normalize('NFD') : s.normalize('NFC'));
 }
 function speakable(t){
   // NFC : Word stocke parfois « é » en « e » + accent séparé, ce qui casse la lecture
@@ -1670,13 +1704,19 @@ function inspectCurrent(){
     .map(([c,n])=>c+' U+'+c.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')+' ×'+n)
     .join('   ') || 'aucun';
   const compose = /[\u0300-\u036f]/.test(sp) ? 'décomposés' : 'composés';
+  const bad = badElisions(sp);
+  const elis = bad.length
+    ? bad.map(c=>c+' U+'+c.codePointAt(0).toString(16).toUpperCase().padStart(4,'0')).join(' ')
+      +' — la consonne sera épelée, à signaler'
+    : 'aucune, la liaison sera faite';
   const txt =
     'BLOC '+(S.b+1)+' PASSAGE '+(S.j+1)+' · mode '+(S.mode==='audio'?'écoute':'origine')+'\n'+
     'voix : '+(S.gvoice||'locale')+'\n\n'+
     'ENVOYÉ À LA SYNTHÈSE, découpé en '+parts.length+' fichiers :\n'+
     parts.map((p,i)=>(i+1)+') '+p).join('\n')+'\n\n'+
     'caractères inhabituels : '+hex+'\n'+
-    'forme des accents envoyée : '+compose;
+    'forme des accents envoyée : '+compose+'\n'+
+    'élisions à risque : '+elis;
   box.textContent = txt;
   box.style.display='block';
   navigator.clipboard && navigator.clipboard.writeText(txt).then(
