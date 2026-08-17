@@ -355,7 +355,7 @@ input[type=file]{display:none}
 /* ============================================================
    Lecteur — documents lus à voix haute, avec adaptation à l'écoute
    ============================================================ */
-const VERSION = '2026-08-17 · build 17';
+const VERSION = '2026-08-17 · build 18';
 const $ = s => document.querySelector(s);
 const synth = window.speechSynthesis;
 if (window.pdfjsLib) pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -1594,6 +1594,33 @@ function resumeReading(){
 /* ============================================================
    9. VOIX ET RÉGLAGES
    ============================================================ */
+/* La voix entre dans la clé du cache audio : si elle dérive sans être vue, tout
+   l'audio déjà préparé est resynthétisé, donc refacturé, en silence. Règle tenue
+   ici : l'appli restitue la voix enregistrée telle quelle et ne choisit jamais à
+   la place de l'utilisateur. Une voix enregistrée absente de la liste est
+   conservée et signalée, pas remplacée. */
+function paintVoice(){
+  $('#verInfo').textContent = VERSION + ' · voix : ' + (S.gvoice || 'non choisie');
+}
+function paintCloudVoices(){
+  const sel=$('#voiceSel'); sel.innerHTML='';
+  S.voices.forEach(v=>{
+    const fam=/Chirp3-HD/i.test(v.name)?'Chirp 3 HD':/Neural2/i.test(v.name)?'Neural2'
+      :/Studio/i.test(v.name)?'Studio':/Wavenet/i.test(v.name)?'Wavenet':'Standard';
+    const o=document.createElement('option'); o.value=v.name;
+    o.textContent=fam+' · '+v.name.replace('fr-FR-','')+' · '+(v.ssmlGender==='FEMALE'?'F':'H');
+    sel.appendChild(o);
+  });
+  const want=S.gvoice;
+  if(!want){ sel.selectedIndex=-1; return; }   // aucune voix enregistrée : on n'en invente pas
+  sel.value=want;
+  if(sel.value!==want){                        // enregistrée mais absente : on la garde et on le dit
+    const o=document.createElement('option');
+    o.value=want; o.textContent='⚠ '+want.replace('fr-FR-','')+' · enregistrée, absente de la liste';
+    sel.insertBefore(o, sel.firstChild); sel.value=want;
+    toast('Voix enregistrée introuvable : '+want.replace('fr-FR-','')+'. Elle est conservée telle quelle.');
+  }
+}
 async function fetchVoices(){
   const key=$('#gkey').value.trim()||S.gkey;
   if(!key){ toast("Ajoutez la clé Google d'abord"); return; }
@@ -1604,15 +1631,7 @@ async function fetchVoices(){
     const rank=n=>/Chirp3-HD/i.test(n)?0:/Neural2/i.test(n)?1:/Studio/i.test(n)?2:/Wavenet/i.test(n)?3:4;
     S.voices=(d.voices||[]).filter(v=>v.languageCodes.includes('fr-FR'))
       .sort((a,b)=>rank(a.name)-rank(b.name)||a.name.localeCompare(b.name));
-    const sel=$('#voiceSel'); sel.innerHTML='';
-    S.voices.forEach(v=>{
-      const fam=/Chirp3-HD/i.test(v.name)?'Chirp 3 HD':/Neural2/i.test(v.name)?'Neural2'
-        :/Studio/i.test(v.name)?'Studio':/Wavenet/i.test(v.name)?'Wavenet':'Standard';
-      const o=document.createElement('option'); o.value=v.name;
-      o.textContent=fam+' · '+v.name.replace('fr-FR-','')+' · '+(v.ssmlGender==='FEMALE'?'F':'H');
-      sel.appendChild(o);
-    });
-    if(S.gvoice) sel.value=S.gvoice; else if(S.voices.length) S.gvoice=sel.value;
+    paintCloudVoices(); paintVoice();
     toast(S.voices.length+' voix françaises');
   }catch(e){ toast('Voix indisponibles : '+e.message); }
 }
@@ -1731,7 +1750,8 @@ function syncEngineUI(){
     ? 'Chirp 3 HD est la plus naturelle. Wavenet consomme le même quota gratuit.'
     : 'Voix installées sur le téléphone. Paramètres, Accessibilité, Synthèse vocale.';
   if(!cloud) loadLocalVoices();
-  else if(!S.voices.length) $('#voiceSel').innerHTML='<option>Chargez la liste</option>';
+  else if(!S.voices.length) $('#voiceSel').innerHTML='<option value="">Chargez la liste</option>';
+  else paintCloudVoices();   // retour au cloud : la liste locale ne doit pas rester en place
 }
 function syncMode(){
   $('#btnMode').textContent = S.mode==='audio' ? 'Écoute' : 'Original';
@@ -1818,17 +1838,28 @@ gapUI('gapS','gapS'); gapUI('gapP','gapP'); gapUI('gapB','gapB');
 $('#ahead').oninput=e=>{ S.ahead=+e.target.value; $('#aheadVal').textContent=S.ahead+' min'; };
 $('#accents').onchange=e=>{ S.accents=e.target.value; loadState().then(paintRail); };
 $('#voiceSel').onchange=e=>{
-  if(S.engine==='cloud'){ S.gvoice=e.target.value; loadState().then(paintRail); }
-  else S.localVoice=synth.getVoices().find(v=>v.voiceURI===e.target.value)||null;
+  if(S.engine!=='cloud'){
+    S.localVoice=synth.getVoices().find(v=>v.voiceURI===e.target.value)||null; return;
+  }
+  const v=e.target.value;
+  if(!/^fr-FR-/.test(v) || v===S.gvoice) return;    // placeholder, ou pas de changement réel
+  const avant=S.gvoice; S.gvoice=v; paintVoice();
+  loadState().then(()=>{ paintRail();
+    toast(avant
+      ? 'Voix : '+v.replace('fr-FR-','')+' — l\'audio préparé avec '+avant.replace('fr-FR-','')+' sera resynthétisé'
+      : 'Voix : '+v.replace('fr-FR-',''));
+  });
 };
 $('#saveSet').onclick=async()=>{
   S.engine=$('#engine').value; S.gkey=$('#gkey').value.trim();
-  S.gvoice=$('#voiceSel').value||S.gvoice;
+  const picked=$('#voiceSel').value;                 // en cloud, seul un nom d'API est recevable
+  if(S.engine==='cloud'){ if(/^fr-FR-/.test(picked)) S.gvoice=picked; }
+  else S.gvoice=picked||S.gvoice;
   S.apiKey=$('#apiKey').value.trim(); S.model=$('#model').value.trim()||'claude-sonnet-5';
   await setKV('cfg',{engine:S.engine,gkey:S.gkey,gvoice:S.gvoice,apiKey:S.apiKey,model:S.model,
     accents:S.accents,rate:S.rate,gapS:S.gapS,gapP:S.gapP,gapB:S.gapB,ahead:S.ahead,
     localVoice:S.localVoice?S.localVoice.voiceURI:''});
-  await loadState(); paintRail(); closeSheets(); toast('Réglages enregistrés');
+  await loadState(); paintRail(); paintVoice(); closeSheets(); toast('Réglages enregistrés');
 };
 document.addEventListener('keydown',e=>{
   if(/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) return;
@@ -1856,7 +1887,7 @@ document.addEventListener('keydown',e=>{
   }
   $('#accents').value=S.accents;
   $('#ahead').value=S.ahead; $('#aheadVal').textContent=S.ahead+' min';
-  $('#verInfo').textContent = VERSION + ' · voix : ' + (S.gvoice || 'non choisie');
+  paintVoice();
   syncEngineUI();
   if(S.engine==='cloud'&&S.gkey) fetchVoices();
   if(cfg.localVoice) setTimeout(()=>{
